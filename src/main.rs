@@ -1,12 +1,27 @@
+use clap::Parser;
 use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use tokio::io::AsyncReadExt;
+use tokio_tungstenite::tungstenite::accept;
 use uuid::Uuid;
-//use tokio::sync::Mutex;
-
-use clap::Parser;
 use warp::Filter;
 
+////
+use std::{
+    collections::HashMap,
+    env,
+    io::Error as IoError,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
+
+use futures_channel::mpsc::{unbounded, UnboundedSender};
+use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
+
+use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::tungstenite::protocol::Message;
+////
+///
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -32,17 +47,52 @@ struct DbSearch {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), rusqlite::Error> {
+async fn main() -> Result<()> {
     let args = Args::parse();
-    let connection = connect_to_db()?;
-    let conn = Arc::new(Mutex::new(connection));
-    let connection_req = move |val: ConnectionAttempt| validate_connection(val, Arc::clone(&conn));
-    let hello = warp::path("connect")
-        .and(warp::body::json())
-        .map(connection_req);
+    //let connection = connect_to_db()?;
+    //let conn = Arc::new(Mutex::new(connection));
+    //let connection_req = move |val: ConnectionAttempt| validate_connection(val, Arc::clone(&conn));
+    //let hello = warp::path("connect")
+    //    .and(warp::body::json())
+    //    .map(connection_req);
 
-    warp::serve(hello).run(([127, 0, 0, 1], args.port)).await;
+    //warp::serve(hello).run(([127, 0, 0, 1], args.port)).await;
+    //let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    //while let Ok((stream, _)) = listener.accept().await {
+    //    tokio::spawn(handle_connection(stream));
+    //}
+    //
+    //    warp::serve(hello).run(([127, 0, 0, 1], args.port)).await;
+    let server = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    println!("Server listening on 127.0.0.1:8080");
+    while let Ok((stream, addr)) = server.accept().await {
+        tokio::spawn(handle_connection(stream, addr));
+    }
+
     Ok(())
+}
+
+async fn handle_connection(raw_stream: tokio::net::TcpStream, addr: SocketAddr) {
+    println!("Incoming TCP connection from: {}", addr);
+
+    let mut ws_stream = tokio_tungstenite::accept_async(raw_stream)
+        .await
+        .expect("Error during the websocket handshake occurred");
+    let (tx, rx) = unbounded();
+    let (outgoing, incoming) = ws_stream.split();
+
+    let broadcast_incoming = incoming.try_for_each(|msg| {
+        println!(
+            "Received a message from {}: {}",
+            addr,
+            msg.to_text().unwrap()
+        );
+        future::ok(())
+    });
+    pin_mut!(broadcast_incoming);
+    let receive_from_others = rx.map(Ok).forward(outgoing);
+    future::select(broadcast_incoming, receive_from_others).await;
+    println!("{} disconnected", &addr);
 }
 
 fn validate_connection(data: ConnectionAttempt, db: Arc<Mutex<Connection>>) -> impl warp::Reply {

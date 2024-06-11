@@ -7,6 +7,13 @@ edition = "2021"
 clap = { version = "4.5.6", features = ["derive"] }
 rusqlite = "0.31.0"
 serde = {version= "1.0.203",  features = ["derive"]}
-tokio = {version = "1", features = ["full"]}
+tokio = {version = "1", features = ["full","io-util"]}
 uuid = { version = "1.8.0", features = ["v4", "fast-rng"] }
 warp = "0.3.7"
+tokio-tungstenite = "*"
+futures-util = { version = "0.3.28", default-features = false, features = ["sink", "std"] }
+futures-channel = "0.3.28"
+
+[dependencies.tungstenite]
+version = "0.23.0"
+default-features = false
