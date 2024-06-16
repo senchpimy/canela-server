@@ -1,18 +1,20 @@
 use clap::Parser;
+use jwt_simple::prelude::*;
 use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp::{filters::header::header, Filter};
 
+use core::panic;
 ////
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, RwLock},
 };
 
-use futures_util::{lock::Mutex, FutureExt, StreamExt};
+use futures_util::{FutureExt, StreamExt};
 
-type ValidConnections<S: Into<String>> = Arc<Mutex<HashMap<S, S>>>;
+type ValidConnections<S> = Arc<Mutex<HashMap<S, Vec<u8>>>>;
 
 ////
 ///
@@ -33,6 +35,7 @@ struct ConnectionAttempt {
 #[derive(Deserialize, Serialize)]
 struct NewUserResgistered {
     token: String,
+    session_token: String,
 }
 
 struct DbSearch {
@@ -42,39 +45,47 @@ struct DbSearch {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse(); //Pass trough a Rwlock
-    let connection = connect_to_db()?;
+    let args = Args::parse(); // Assume Args is defined elsewhere
+    let connection = connect_to_db()?; // Assume connect_to_db() is defined elsewhere
     let valid_connections: ValidConnections<String> = Arc::new(Mutex::new(HashMap::new()));
     let conn = Arc::new(Mutex::new(connection));
-    let connection_req = move |val: ConnectionAttempt| {
-        validate_connection(val, Arc::clone(&conn), Arc::clone(&valid_connections))
+
+    let connection_req = {
+        let conn = Arc::clone(&conn);
+        let valid_connections = Arc::clone(&valid_connections);
+        move |val: ConnectionAttempt| {
+            validate_connection(val, Arc::clone(&conn), Arc::clone(&valid_connections))
+        }
     };
+
     let hello = warp::path("connect")
         .and(warp::body::json())
         .map(connection_req);
 
-    let ws = warp::path("ws")
-        .and(warp::ws())
-        .and(warp::header("Custom-Header"))
-        .map(|ws: warp::ws::Ws, header_rx: String| {
-            println!("{}", header_rx);
-            ws.on_upgrade(move |socket| handle_connection(socket))
-        });
+    let ws = {
+        let valid_connections = Arc::clone(&valid_connections);
+        warp::path("ws")
+            .and(warp::ws())
+            .and(warp::header("user_token"))
+            .and(warp::header("jwt"))
+            .map(move |ws: warp::ws::Ws, header_rx: String, jwt: String| {
+                let result = is_valid_connection(Arc::clone(&valid_connections), header_rx, jwt);
+                ws.on_upgrade(move |socket| handle_connection(socket, result))
+            })
+    };
 
     let routes = warp::get().and(hello.or(ws));
     warp::serve(routes).run(([127, 0, 0, 1], args.port)).await;
-    //let warp_server = warp::serve(hello).run(([127, 0, 0, 1], args.http_port));
-    //tokio::spawn(warp_server);
-
     Ok(())
 }
 
-async fn handle_connection(websocket: warp::ws::WebSocket) {
-    let connection_not_valid = true;
-    if connection_not_valid {
+async fn handle_connection(websocket: warp::ws::WebSocket, valid_conn: bool) {
+    if !valid_conn {
         let _ = websocket.close().await;
+        println!("Coneccion InValida");
         return;
     }
+    //Coneccion valida
     let (mut tx, mut rx) = websocket.split();
     let mut index = 0;
     loop {
@@ -102,7 +113,7 @@ async fn handle_connection(websocket: warp::ws::WebSocket) {
                 None => {}
             },
             None => {
-                println!("No hay valor q leer");
+                //println!("No hay valor q leer");
             }
         };
     }
@@ -139,10 +150,12 @@ fn validate_connection(
                 return Err("Error in the db");
             }
         }
+        let user_token = token.to_string();
+        let session_token = add_valid_connection(valid_conn, &user_token);
         let response = NewUserResgistered {
-            token: token.to_string(),
+            token: user_token,
+            session_token,
         };
-        add_valid_connection(valid_conn);
         return Ok(warp::reply::json(&response)); //reply the token and connections left
     }
 
@@ -162,10 +175,11 @@ fn validate_connection(
         let r = r.unwrap();
         dbg!(r.connections_left);
         dbg!(r.id);
+        let session_token = add_valid_connection(valid_conn, &data.token);
         let response = NewUserResgistered {
             token: "Connection stablished".to_string(),
+            session_token,
         };
-        add_valid_connection(valid_conn);
         return Ok(warp::reply::json(&response)); //reply the token and connections left
     }
     Err("Unreachable")
@@ -191,12 +205,42 @@ fn connect_to_db() -> Result<Connection, rusqlite::Error> {
     Ok(conn)
 }
 
-fn add_valid_connection(valid_conn: ValidConnections<String>) {
+fn add_valid_connection(valid_conn: ValidConnections<String>, user_token: &String) -> String {
     loop {
         match valid_conn.lock() {
             Ok(mut conn) => {
-                conn.insert("".into(), "".into());
-                break;
+                let key = HS256Key::generate();
+                let claims = Claims::create(Duration::from_millis(1000));
+                let token = key.authenticate(claims).unwrap();
+                dbg!(&token);
+                conn.insert((*user_token).clone(), key.to_bytes());
+                return token;
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+fn is_valid_connection(
+    valid_conn: ValidConnections<String>,
+    user_token: String,
+    jwt: String,
+) -> bool {
+    loop {
+        match valid_conn.lock() {
+            Ok(conn) => {
+                let validation = conn.get(&user_token);
+                if let Some(res) = validation {
+                    let key = HS256Key::from_bytes(res);
+                    match key.verify_token::<NoCustomClaims>(&jwt, None) {
+                        Ok(_) => {
+                            return true;
+                        }
+                        Err(_) => {
+                            return false;
+                        }
+                    }
+                };
             }
             Err(_) => {}
         }
