@@ -1,23 +1,32 @@
 use clap::Parser;
 use jwt_simple::prelude::*;
 use rusqlite::{Connection, Result};
-use serde::{Deserialize, Serialize};
+use serde::{de::Error, Deserialize, Serialize};
+use serde_json;
 use uuid::Uuid;
-use warp::{filters::header::header, Filter};
-
-use core::panic;
+use warp::Filter;
 ////
 use std::{
     collections::HashMap,
+    str::FromStr,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
-use futures_util::{FutureExt, StreamExt};
+use futures_util::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
+enum IncomingMessage {
+    Text(TextMessageRecivedProcessed),
+    Binary,
+}
 
 type ValidConnections<S> = Arc<Mutex<HashMap<S, Vec<u8>>>>;
+type SINGLEUsersConnected = Arc<Mutex<HashMap<String, IncomingMessage>>>; //Hashmap of current users
+                                                                          //online and a reference to a
+                                                                          //variable that checks for uncoming messages
 
-////
-///
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -38,6 +47,23 @@ struct NewUserResgistered {
     session_token: String,
 }
 
+#[derive(Deserialize, Serialize)]
+struct TextMessageRecivedRaw {
+    payload: String,
+    destination: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TextMessageRecivedProcessed {
+    payload: String,
+    destination: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TextMessageRecivedRawError {
+    error: String,
+}
+
 struct DbSearch {
     id: i32,
     connections_left: i32,
@@ -48,6 +74,7 @@ async fn main() -> Result<()> {
     let args = Args::parse(); // Assume Args is defined elsewhere
     let connection = connect_to_db()?; // Assume connect_to_db() is defined elsewhere
     let valid_connections: ValidConnections<String> = Arc::new(Mutex::new(HashMap::new()));
+    let CONNECTED_USERS: SINGLEUsersConnected = Arc::new(Mutex::new(HashMap::new()));
     let conn = Arc::new(Mutex::new(connection));
 
     let connection_req = {
@@ -69,8 +96,11 @@ async fn main() -> Result<()> {
             .and(warp::header("user_token"))
             .and(warp::header("jwt"))
             .map(move |ws: warp::ws::Ws, header_rx: String, jwt: String| {
+                let conn_users = Arc::clone(&CONNECTED_USERS);
                 let result = is_valid_connection(Arc::clone(&valid_connections), header_rx, jwt);
-                ws.on_upgrade(move |socket| handle_connection(socket, result))
+                ws.on_upgrade(move |socket| {
+                    handle_connection(socket, result, Arc::clone(&conn_users))
+                })
             })
     };
 
@@ -79,44 +109,74 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(websocket: warp::ws::WebSocket, valid_conn: bool) {
+async fn sending(mut tx: SplitSink<warp::ws::WebSocket, warp::ws::Message>) {
+    let mut index: u64 = 0;
+    loop {
+        let m = warp::filters::ws::Message::text(format!("AAAA {}", index));
+        match tx.send(m).await {
+            Ok(_) => {} //Enviado con exito
+            Err(_) => {
+                let _ = tx.close().await;
+            } //Error al enviar
+        };
+        index += 1;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        println!("mimido");
+    }
+}
+
+async fn receving(mut rx: SplitStream<warp::ws::WebSocket>, connected_users: SINGLEUsersConnected) {
+    loop {
+        match rx.next().await {
+            Some(val) => match val {
+                Ok(v) => {
+                    if v.is_close() {
+                        println!("Cerrado");
+                        return;
+                    }
+                    if v.is_text() {
+                        let s: Result<TextMessageRecivedRaw, serde_json::Error> =
+                            serde_json::from_str(v.to_str().unwrap());
+                        match s {
+                            Ok(val) => {
+                                let mut c = connected_users.lock();
+                                let inc_message = IncomingMessage::Binary; //Change for processed
+                                                                           //one
+                                c.as_mut().unwrap().insert(val.destination, inc_message);
+                                //Dont
+                                //override older messages
+                            }
+                            Err(_) => {
+                                let error = String::from_str("Bad format").unwrap();
+                                let _error = TextMessageRecivedRawError { error };
+                            }
+                        }
+                    }
+                    dbg!(v);
+                    println!("Recived Message");
+                }
+                Err(_) => {}
+            },
+            None => {}
+        };
+    }
+}
+
+async fn handle_connection(
+    websocket: warp::ws::WebSocket,
+    valid_conn: bool,
+    connected_users: SINGLEUsersConnected,
+) {
     if !valid_conn {
         let _ = websocket.close().await;
         println!("Coneccion InValida");
         return;
     }
-    //Coneccion valida
-    let (mut tx, mut rx) = websocket.split();
-    let mut index = 0;
-    loop {
-        //let m = warp::filters::ws::Message::text(format!("AAAA {}", index));
-        //match tx.send(m).await {
-        //    Ok(_) => {} //Enviado con exito
-        //    Err(_) => {
-        //        let _ = tx.close().await;
-        //    } //Error al enviar
-        //};
-        //index += 1;
-
-        match rx.next().now_or_never() {
-            Some(val) => match val {
-                Some(v) => {
-                    println!("Recived Message");
-                    match v {
-                        Ok(v) => {
-                            dbg!(v);
-                        }
-                        Err(_) => {}
-                    }
-                    loop {}
-                }
-                None => {}
-            },
-            None => {
-                //println!("No hay valor q leer");
-            }
-        };
-    }
+    println!("Coneccion Valida");
+    let (tx, rx) = websocket.split();
+    let tx = tokio::spawn(sending(tx));
+    let rx = tokio::spawn(receving(rx, connected_users));
+    let res = tokio::try_join!(tx, rx);
 }
 
 fn validate_connection(
@@ -210,7 +270,7 @@ fn add_valid_connection(valid_conn: ValidConnections<String>, user_token: &Strin
         match valid_conn.lock() {
             Ok(mut conn) => {
                 let key = HS256Key::generate();
-                let claims = Claims::create(Duration::from_millis(1000));
+                let claims = Claims::create(jwt_simple::prelude::Duration::from_millis(1000));
                 let token = key.authenticate(claims).unwrap();
                 dbg!(&token);
                 conn.insert((*user_token).clone(), key.to_bytes());
@@ -233,8 +293,13 @@ fn is_valid_connection(
                 if let Some(res) = validation {
                     let key = HS256Key::from_bytes(res);
                     match key.verify_token::<NoCustomClaims>(&jwt, None) {
-                        Ok(_) => {
-                            return true;
+                        Ok(o) => {
+                            let now = Clock::now_since_epoch();
+                            let is_expired = o.expires_at.unwrap() < now;
+                            if is_expired {
+                                println!("Expirado");
+                            }
+                            return !is_expired;
                         }
                         Err(_) => {
                             return false;
