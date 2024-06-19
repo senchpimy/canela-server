@@ -1,13 +1,16 @@
+use chrono::prelude::{DateTime, Utc};
 use clap::Parser;
 use jwt_simple::prelude::*;
+use lazy_static::lazy_static;
 use rusqlite::{Connection, Result};
-use serde::{de::Error, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json;
 use uuid::Uuid;
 use warp::Filter;
 ////
 use std::{
     collections::HashMap,
+    fs,
     str::FromStr,
     sync::{Arc, Mutex, RwLock},
     time::Duration,
@@ -22,16 +25,33 @@ enum IncomingMessage {
     Binary,
 }
 
+static DB_NAME: &str = "canela-server.sb";
+
 type ValidConnections<S> = Arc<Mutex<HashMap<S, Vec<u8>>>>;
-type SINGLEUsersConnected = Arc<Mutex<HashMap<String, IncomingMessage>>>; //Hashmap of current users
-                                                                          //online and a reference to a
-                                                                          //variable that checks for uncoming messages
+type SINGLEUsersConnected = Arc<Mutex<HashMap<String, Vec<IncomingMessage>>>>; //Hashmap of current users
+                                                                               //online and a reference to a
+                                                                               //variable that checks for uncoming messages
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(long, default_value_t = 3030)]
     port: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ServerConfig {
+    register_time_message_sent: bool,
+    register_time_message_recived: bool,
+}
+
+lazy_static! {
+    static ref CONFIG: RwLock<ServerConfig> = RwLock::new(load_config());
+}
+
+fn load_config() -> ServerConfig {
+    let config_data = fs::read_to_string("config.json").expect("Unable to read config file");
+    serde_json::from_str(&config_data).expect("Unable to parse config file")
 }
 
 #[derive(Deserialize, Serialize)]
@@ -47,19 +67,49 @@ struct NewUserResgistered {
     session_token: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug)]
 struct TextMessageRecivedRaw {
     payload: String,
     destination: String,
 }
 
-#[derive(Deserialize, Serialize)]
-struct TextMessageRecivedProcessed {
-    payload: String,
-    destination: String,
+impl TextMessageRecivedRaw {
+    fn to_processed(&self, from: &String) -> TextMessageRecivedProcessed {
+        let config = CONFIG.read().unwrap();
+        let time_recived = if config.register_time_message_recived {
+            Some(())
+        } else {
+            None
+        };
+        let time_sent = if config.register_time_message_sent {
+            Some(Utc::now().to_string())
+        } else {
+            None
+        };
+        let from = from.clone();
+        //let payload = self.payload;
+        TextMessageRecivedProcessed {
+            payload: self.payload.clone(),
+            from,
+            time_recived,
+            time_sent,
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
+struct TextMessageRecivedProcessed {
+    payload: String,
+    from: String,
+    time_sent: Option<String>,
+    time_recived: Option<()>,
+}
+
+struct CurrentUser {
+    id: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
 struct TextMessageRecivedRawError {
     error: String,
 }
@@ -72,7 +122,7 @@ struct DbSearch {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse(); // Assume Args is defined elsewhere
-    let connection = connect_to_db()?; // Assume connect_to_db() is defined elsewhere
+    let connection = prepare_db()?; // Assume connect_to_db() is defined elsewhere
     let valid_connections: ValidConnections<String> = Arc::new(Mutex::new(HashMap::new()));
     let CONNECTED_USERS: SINGLEUsersConnected = Arc::new(Mutex::new(HashMap::new()));
     let conn = Arc::new(Mutex::new(connection));
@@ -108,7 +158,6 @@ async fn main() -> Result<()> {
     warp::serve(routes).run(([127, 0, 0, 1], args.port)).await;
     Ok(())
 }
-
 async fn sending(mut tx: SplitSink<warp::ws::WebSocket, warp::ws::Message>) {
     let mut index: u64 = 0;
     loop {
@@ -125,7 +174,11 @@ async fn sending(mut tx: SplitSink<warp::ws::WebSocket, warp::ws::Message>) {
     }
 }
 
-async fn receving(mut rx: SplitStream<warp::ws::WebSocket>, connected_users: SINGLEUsersConnected) {
+async fn receving(
+    mut rx: SplitStream<warp::ws::WebSocket>,
+    connected_users: SINGLEUsersConnected,
+    current_id: String,
+) {
     loop {
         match rx.next().await {
             Some(val) => match val {
@@ -139,21 +192,29 @@ async fn receving(mut rx: SplitStream<warp::ws::WebSocket>, connected_users: SIN
                             serde_json::from_str(v.to_str().unwrap());
                         match s {
                             Ok(val) => {
-                                let mut c = connected_users.lock();
-                                let inc_message = IncomingMessage::Binary; //Change for processed
-                                                                           //one
-                                c.as_mut().unwrap().insert(val.destination, inc_message);
-                                //Dont
-                                //override older messages
+                                dbg!(&val);
+                                let mut c = connected_users.lock().unwrap();
+                                let inc_message =
+                                    IncomingMessage::Text(val.to_processed(&current_id));
+                                match c.get_mut(&val.destination) {
+                                    Some(vector) => {
+                                        vector.push(inc_message);
+                                        dbg!("MEnsaje enviado a que");
+                                    }
+                                    None => {
+                                        //User is online but it dosent exists? probably Unreachable
+                                        //c.insert(val.destination, vec![inc_message]);
+                                        save_message(&val.destination);
+                                    }
+                                };
                             }
                             Err(_) => {
                                 let error = String::from_str("Bad format").unwrap();
-                                let _error = TextMessageRecivedRawError { error };
+                                let error = TextMessageRecivedRawError { error };
+                                dbg!(error); //Propagate Error to sender
                             }
                         }
                     }
-                    dbg!(v);
-                    println!("Recived Message");
                 }
                 Err(_) => {}
             },
@@ -174,8 +235,9 @@ async fn handle_connection(
     }
     println!("Coneccion Valida");
     let (tx, rx) = websocket.split();
+    let current = CurrentUser { id: String::new() };
     let tx = tokio::spawn(sending(tx));
-    let rx = tokio::spawn(receving(rx, connected_users));
+    let rx = tokio::spawn(receving(rx, connected_users, current.id));
     let res = tokio::try_join!(tx, rx);
 }
 
@@ -245,8 +307,8 @@ fn validate_connection(
     Err("Unreachable")
 }
 
-fn connect_to_db() -> Result<Connection, rusqlite::Error> {
-    let conn = Connection::open("canela-server.db")?;
+fn prepare_db() -> Result<Connection, rusqlite::Error> {
+    let conn = Connection::open(DB_NAME)?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS users (
                   id INTEGER PRIMARY KEY,
@@ -263,6 +325,25 @@ fn connect_to_db() -> Result<Connection, rusqlite::Error> {
         [],
     )?;
     Ok(conn)
+}
+
+fn connect_to_db() -> Result<Connection, rusqlite::Error> {
+    let conn = Connection::open(DB_NAME)?;
+    Ok(conn)
+}
+
+fn save_message(destination: &String) -> Option<()> {
+    let conn = connect_to_db().unwrap();
+    let mut search = conn.prepare("SELECT 1 FROM users WHERE id=?").unwrap();
+    let rows = search.query_map(&[destination], |_| Ok(())).unwrap();
+    for _r in rows {
+        let dbg = conn.execute(
+            "INSERT INTO undelivered_messages (user_id, message) VALUES (?1, ?2)",
+            (&destination, &2), //TODO
+        );
+        dbg!(&dbg);
+    }
+    Some(())
 }
 
 fn add_valid_connection(valid_conn: ValidConnections<String>, user_token: &String) -> String {

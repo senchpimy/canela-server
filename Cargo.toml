@@ -15,6 +15,8 @@ tokio-tungstenite = "*"
 futures-util = { version = "0.3.28", default-features = false, features = ["sink", "std"] }
 futures-channel = "0.3.28"
 jwt-simple = "0.12"
+chrono = "0.4.38"
+lazy_static = "1.4.0"
 
 [dependencies.tungstenite]
 version = "0.23.0"
