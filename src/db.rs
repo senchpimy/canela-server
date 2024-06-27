@@ -1,0 +1,129 @@
+use crate::{add_valid_connection, NewUserResgistered};
+use rusqlite::{Connection, Result};
+static DB_NAME: &str = "canela-server.db";
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
+#[derive(Deserialize, Serialize)]
+pub struct ConnectionAttempt {
+    password: String,
+    user: String,
+    token: String,
+}
+
+pub type ValidConnections<S> = Arc<Mutex<HashMap<S, Vec<u8>>>>;
+
+struct DbSearch {
+    id: i32,
+    connections_left: i32,
+}
+
+pub fn prepare_db() -> Result<Connection, rusqlite::Error> {
+    let conn = Connection::open(DB_NAME)?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS users (
+                  id INTEGER PRIMARY KEY,
+                  token TEXT NOT NULL,
+                  connections_left INTEGER NOT NULL)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS undelivered_messages (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    message TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id));",
+        [],
+    )?;
+    Ok(conn)
+}
+
+pub fn connect_to_db() -> Result<Connection, rusqlite::Error> {
+    let conn = Connection::open(DB_NAME)?;
+    Ok(conn)
+}
+
+pub fn save_message(destination: &String) -> Option<()> {
+    let conn = connect_to_db().unwrap();
+    let mut search = conn.prepare("SELECT 1 FROM users WHERE id=?").unwrap();
+    let rows = search.query_map(&[destination], |_| Ok(())).unwrap();
+    for _r in rows {
+        let dbg = conn.execute(
+            "INSERT INTO undelivered_messages (user_id, message) VALUES (?1, ?2) WHERE id=?3",
+            (&destination, &2, &destination), //TODO
+        );
+        dbg!(&dbg);
+    }
+    Some(())
+}
+
+pub fn validate_connection(
+    data: ConnectionAttempt,
+    db: Arc<Mutex<Connection>>,
+    valid_conn: ValidConnections<String>,
+) -> impl warp::Reply {
+    let server_require_password = true; //TODO Get from config
+    let server_can_generate_new_tokens = true; //TODO Get from config
+    let server_password = String::from(""); //TODO Get from config
+    if server_require_password {
+        if data.password != server_password {
+            return Err("Wrong password");
+        }
+    }
+    let r = db.lock().unwrap();
+    //Case where user is not registered, so we add them to the whitelist and send back the token
+    if data.token.len() == 0 && server_can_generate_new_tokens {
+        let token = Uuid::new_v4();
+        let res = r.execute(
+            &format!(
+                "INSERT INTO users (token, connections_left) VALUES ('{}', {})",
+                token,
+                20 //TODO Get from config
+            ),
+            [],
+        );
+        match res {
+            Ok(_) => {}
+            Err(_) => {
+                return Err("Error in the db");
+            }
+        }
+        let user_token = token.to_string();
+        let session_token = add_valid_connection(valid_conn, &user_token);
+        let response = NewUserResgistered {
+            token: user_token,
+            session_token,
+        };
+        return Ok(warp::reply::json(&response)); //reply the token and connections left
+    }
+
+    //Case where the user is registered
+    let mut search = r
+        .prepare("SELECT connections_left,id FROM users WHERE token=?")
+        .unwrap();
+    let rows = search
+        .query_map(&[&data.token], |row| {
+            Ok(DbSearch {
+                connections_left: row.get(0).unwrap(),
+                id: row.get(1).unwrap(),
+            })
+        })
+        .unwrap();
+    for r in rows {
+        let r = r.unwrap();
+        dbg!(r.connections_left);
+        dbg!(r.id);
+        let session_token = add_valid_connection(valid_conn, &data.token);
+        let response = NewUserResgistered {
+            token: "Connection stablished".to_string(),
+            session_token,
+        };
+        return Ok(warp::reply::json(&response)); //reply the token and connections left
+    }
+    Err("User not In the Server") //Its actually reachable
+}
