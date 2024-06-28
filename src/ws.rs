@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug)]
 pub enum IncomingMessage {
     Text(TextMessageRecivedProcessed),
-    Binary,
+    Binary(BLOBMessageRecivedProcessed),
 }
 
 use futures_util::{
@@ -26,7 +26,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::prelude::{DateTime, Utc};
+use chrono::prelude::Utc;
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TextMessageRecivedRaw {
@@ -40,34 +40,41 @@ pub struct TextMessageRecivedRawError {
 }
 
 impl TextMessageRecivedRaw {
-    fn to_processed(&self, from: &String) -> TextMessageRecivedProcessed {
+    fn to_processed(self, from: &String) -> TextMessageRecivedProcessed {
         //let config = CONFIG.read().unwrap();
-        //let time_recived = if config.register_time_message_recived {
-        let time_recived = if true { Some(()) } else { None };
         //let time_sent = if config.register_time_message_sent {
         let time_sent = if true {
-            Some(Utc::now().to_string())
+            Utc::now().to_string()
         } else {
-            None
+            String::new()
         };
         let from = from.clone();
         //let payload = self.payload;
         TextMessageRecivedProcessed {
-            payload: self.payload.clone(),
+            payload: self.payload,
             from,
-            time_recived,
             time_sent,
+            to: self.destination,
         }
     }
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TextMessageRecivedProcessed {
-    payload: String,
-    from: String,
-    time_sent: Option<String>,
-    time_recived: Option<()>,
+    pub payload: String,
+    pub from: String,
+    pub time_sent: String,
+    pub to: String,
 }
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct BLOBMessageRecivedProcessed {
+    pub payload: Vec<u8>,
+    pub from: String,
+    pub time_sent: String,
+    pub to: String,
+}
+
 async fn sending(
     mut tx: SplitSink<warp::ws::WebSocket, warp::ws::Message>,
     state: Arc<RwLock<bool>>,
@@ -113,19 +120,19 @@ async fn receving(
                         match s {
                             Ok(val) => {
                                 dbg!(&val);
-                                let mut c = connected_users.lock().unwrap();
-                                let inc_message =
-                                    IncomingMessage::Text(val.to_processed(&current_id));
-                                dbg!(&inc_message);
-                                match c.get_mut(&val.destination) {
+                                let mut connection = connected_users.lock().unwrap();
+                                let processed = val.to_processed(&current_id);
+                                match connection.get_mut(&processed.to) {
                                     Some(vector) => {
-                                        vector.push(inc_message);
-                                        dbg!("MEnsaje enviado a que");
+                                        vector.push(IncomingMessage::Text(processed));
+                                        dbg!("Mensaje enviado a que");
                                     }
                                     None => {
                                         //User is online but it dosent exists? probably Unreachable
                                         //c.insert(val.destination, vec![inc_message]);
-                                        db::save_message(&val.destination, &val);
+                                        let _result = db::save_message_text(&processed);
+                                        //TODO
+                                        //HANDLE RESULT
                                     }
                                 };
                             }
@@ -135,6 +142,10 @@ async fn receving(
                                 dbg!(error); //Propagate Error to sender
                             }
                         }
+                    }
+                    if v.is_binary() {
+                        let _s: Result<BLOBMessageRecivedProcessed, serde_json::Error> =
+                            serde_json::from_str(v.to_str().unwrap());
                     }
                 }
                 Err(_) => {}

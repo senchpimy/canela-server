@@ -1,4 +1,8 @@
-use crate::{add_valid_connection, ws::TextMessageRecivedRaw, NewUserResgistered};
+use crate::{
+    add_valid_connection,
+    ws::{IncomingMessage, TextMessageRecivedProcessed},
+    NewUserResgistered,
+};
 use rusqlite::{Connection, Result};
 static DB_NAME: &str = "canela-server.db";
 use serde::{Deserialize, Serialize};
@@ -37,6 +41,18 @@ pub fn prepare_db() -> Result<Connection, rusqlite::Error> {
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL,
     message TEXT NOT NULL,
+    date TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id));",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS undelivered_messages_blob (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    data blob NOT NULL,
+    date TEXT NOT NULL,
+    sender TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users (id));",
         [],
     )?;
@@ -48,24 +64,24 @@ pub fn connect_to_db() -> Result<Connection, rusqlite::Error> {
     Ok(conn)
 }
 
-pub fn save_message(sender: &String, recieved: &TextMessageRecivedRaw) -> Option<()> {
+pub fn save_message_text(recieved: &TextMessageRecivedProcessed) -> Option<()> {
     let conn = connect_to_db().unwrap();
     let mut search = conn.prepare("SELECT 1 FROM users WHERE id=?").unwrap();
-    let rows = search
-        .query_map(&[&recieved.destination], |_| Ok(()))
-        .unwrap();
+    let rows = search.query_map(&[&recieved.to], |_| Ok(())).unwrap();
     for _r in rows {
         let dbg = conn.execute(
-            "INSERT INTO undelivered_messages (user_id, message) VALUES (?1, ?2)",
-            [sender, &recieved.payload],
+            "INSERT INTO undelivered_messages (user_id, message,sender,date) VALUES (?1, ?2, ?3)",
+            [
+                &recieved.to,
+                &recieved.payload,
+                &recieved.from,
+                &recieved.time_sent,
+            ],
         );
 
         match dbg {
-            Ok(_) => {
-                println!("Mensaje insertado con exito");
-            }
-            Err(a) => {
-                dbg!(a);
+            Ok(_) => {}
+            Err(_) => {
                 return None;
             }
         }
