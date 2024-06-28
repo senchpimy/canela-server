@@ -11,7 +11,6 @@ use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
-
 struct CurrentUser {
     id: String,
 }
@@ -23,20 +22,20 @@ pub type SINGLEUsersConnected = Arc<Mutex<HashMap<String, Vec<IncomingMessage>>>
 use std::{
     collections::HashMap,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
 use chrono::prelude::{DateTime, Utc};
 
 #[derive(Deserialize, Serialize, Debug)]
-struct TextMessageRecivedRaw {
-    payload: String,
-    destination: String,
+pub struct TextMessageRecivedRaw {
+    pub payload: String,
+    pub destination: String,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-struct TextMessageRecivedRawError {
+pub struct TextMessageRecivedRawError {
     error: String,
 }
 
@@ -69,9 +68,16 @@ pub struct TextMessageRecivedProcessed {
     time_sent: Option<String>,
     time_recived: Option<()>,
 }
-async fn sending(mut tx: SplitSink<warp::ws::WebSocket, warp::ws::Message>) {
+async fn sending(
+    mut tx: SplitSink<warp::ws::WebSocket, warp::ws::Message>,
+    state: Arc<RwLock<bool>>,
+) {
     let mut index: u64 = 0;
     loop {
+        if *(state.read().unwrap()) {
+            println!("Cerrado desde El sender");
+            return;
+        }
         let m = warp::filters::ws::Message::text(format!("AAAA {}", index));
         match tx.send(m).await {
             Ok(_) => {} //Enviado con exito
@@ -89,6 +95,7 @@ async fn receving(
     mut rx: SplitStream<warp::ws::WebSocket>,
     connected_users: SINGLEUsersConnected,
     current_id: String,
+    state: Arc<RwLock<bool>>,
 ) {
     loop {
         match rx.next().await {
@@ -96,6 +103,8 @@ async fn receving(
                 Ok(v) => {
                     if v.is_close() {
                         println!("Cerrado");
+                        let mut s = state.write().unwrap();
+                        *s = true;
                         return;
                     }
                     if v.is_text() {
@@ -116,7 +125,7 @@ async fn receving(
                                     None => {
                                         //User is online but it dosent exists? probably Unreachable
                                         //c.insert(val.destination, vec![inc_message]);
-                                        db::save_message(&val.destination);
+                                        db::save_message(&val.destination, &val);
                                     }
                                 };
                             }
@@ -139,6 +148,7 @@ pub async fn handle_connection(
     websocket: warp::ws::WebSocket,
     valid_conn: bool,
     connected_users: SINGLEUsersConnected,
+    cuurent: String,
 ) {
     if !valid_conn {
         let _ = websocket.close().await;
@@ -147,8 +157,14 @@ pub async fn handle_connection(
     }
     println!("Coneccion Valida");
     let (tx, rx) = websocket.split();
-    let current = CurrentUser { id: String::new() }; //TODO Let it be the id in the server
-    let tx = tokio::spawn(sending(tx));
-    let rx = tokio::spawn(receving(rx, connected_users, current.id));
+    let current = CurrentUser { id: cuurent }; //TODO Let it be the id in the server
+    let connection_state = Arc::new(RwLock::new(false));
+    let tx = tokio::spawn(sending(tx, Arc::clone(&connection_state)));
+    let rx = tokio::spawn(receving(
+        rx,
+        connected_users,
+        current.id,
+        Arc::clone(&connection_state),
+    ));
     let res = tokio::try_join!(tx, rx);
 }

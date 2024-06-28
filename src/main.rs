@@ -72,7 +72,12 @@ async fn main() {
                 let conn_users = Arc::clone(&CONNECTED_USERS);
                 let result = is_valid_connection(Arc::clone(&valid_connections), header_rx, jwt);
                 ws.on_upgrade(move |socket| {
-                    ws::handle_connection(socket, result, Arc::clone(&conn_users))
+                    ws::handle_connection(
+                        socket,
+                        result,
+                        Arc::clone(&conn_users),
+                        String::from("sss"),
+                    )
                 })
             })
     };

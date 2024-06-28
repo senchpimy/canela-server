@@ -15,7 +15,7 @@ import json
 
 text_recived_raw = {
         "payload":None,
-        "destination":"main"
+        "destination":"1"
         }
 
 class CanelaError(Exception):
@@ -36,7 +36,7 @@ def receiving_messages(websocket):
 
 def connect_to_websocket(jwt):
     uri = "ws://127.0.0.1:3030/ws"
-    headers = {"jwt": jwt, "user_id": "1", "user_token": data["token"]}
+    headers = {"jwt": jwt,  "user_token": data["token"]}
 
     #with websockets.connect(uri, extra_headers=headers) as websocket: #Why The difference in parameter names?
     with connect(uri,additional_headers=headers) as websocket:
