@@ -1,5 +1,6 @@
 use crate::db;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::from_slice;
 use std::any::Any;
 
 #[derive(Debug)]
@@ -159,10 +160,11 @@ async fn receving(
                         return;
                     }
                     if v.is_text() {
-                        handle_sending::<TextMessageRecivedRaw>(&v, &connected_users, &current_id);
+                        handle_sending::<TextMessageRecivedRaw>(v, &connected_users, &current_id);
+                        break;
                     }
                     if v.is_binary() {
-                        handle_sending::<BLOBMessageRecivedRaw>(&v, &connected_users, &current_id);
+                        handle_sending::<BLOBMessageRecivedRaw>(v, &connected_users, &current_id);
                     }
                 }
                 Err(_) => {}
@@ -172,13 +174,19 @@ async fn receving(
 }
 
 fn handle_sending<T>(
-    v: &warp::ws::Message,
+    v: warp::ws::Message,
     connected_users: &SINGLEUsersConnected,
     current_id: &String,
 ) where
     T: DeserializeOwned + Debug + ToProcessed,
 {
-    let result: Result<T, serde_json::Error> = serde_json::from_str(v.to_str().unwrap());
+    //let str = v.to_str().unwrap();
+    //v.into_bytes().
+    let result: Result<T, serde_json::Error> = if v.is_binary() {
+        serde_json::from_slice(v.into_bytes().as_slice())
+    } else {
+        serde_json::from_str(v.to_str().unwrap())
+    };
     match result {
         Ok(val) => {
             let mut connection = connected_users.lock().unwrap();
@@ -202,7 +210,15 @@ fn handle_sending<T>(
                                 }
                             };
                         }
-                        IncomingMessage::Binary(_) => {}
+                        IncomingMessage::Binary(v) => {
+                            println!("Binario!");
+                            match db::save_message_binary(&v) {
+                                None => {}
+                                Some(error) => {
+                                    dbg!(error);
+                                }
+                            };
+                        }
                     };
                     //TODO
                     //HANDLE RESULT
@@ -217,10 +233,6 @@ fn handle_sending<T>(
         }
     }
 }
-
-//fn get_value(input: &dyn Processed) -> &dyn Any {
-//    &input as &dyn Any
-//}
 
 pub async fn handle_connection(
     websocket: warp::ws::WebSocket,

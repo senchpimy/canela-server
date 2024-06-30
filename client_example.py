@@ -1,3 +1,4 @@
+import encodings
 import json
 url = "http://localhost:3030/connect"
 headers = {"Content-Type": "application/json"}
@@ -44,13 +45,16 @@ def connect_to_websocket(jwt):
         while True:
             message = input(">")
             if message=="break":break
+            text_recived_raw["payload"]=message
+            #arr = list(message.encode(encoding="utf-8"))
+            #text_recived_raw["payload"]=arr
+            full = json.dumps(text_recived_raw)
+            #full = full.encode(encoding="utf-8")
             try:
-              text_recived_raw["payload"]=message
-              full = json.dumps(text_recived_raw)
               print(full)
               websocket.send(full)
               print("Mensaje Enviado")
-            except:
+            except :
                 raise CanelaError("Error Enviando")
         websocket.close()
 

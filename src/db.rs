@@ -1,15 +1,16 @@
 use crate::{
     add_valid_connection,
-    ws::{IncomingMessage, TextMessageRecivedProcessed},
+    ws::{BLOBMessageRecivedProcessed, TextMessageRecivedProcessed},
     NewUserResgistered,
 };
-use rusqlite::{Connection, Result};
+use rusqlite::{params, Connection, Result};
 static DB_NAME: &str = "canela-server.db";
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use std::{
     collections::HashMap,
+    io::Write,
     sync::{Arc, Mutex},
 };
 
@@ -75,8 +76,39 @@ pub fn save_message_text(recieved: &TextMessageRecivedProcessed) -> Option<Savin
     let rows = search.query_map(&[&recieved.to], |_| Ok(())).unwrap();
     for _r in rows {
         let dbg = conn.execute(
-            "INSERT INTO undelivered_messages (user_id, message,sender,date) VALUES (?1, ?2, ?3)",
+            "INSERT INTO undelivered_messages (user_id, message,sender,date) VALUES (?1, ?2, ?3, ?4)",
             [
+                &recieved.to,
+                &recieved.payload,
+                &recieved.from,
+                &recieved.time_sent,
+            ],
+        );
+
+        match dbg {
+            Ok(a) => {
+                dbg!(a);
+            }
+            Err(error) => {
+                dbg!(error);
+                //return Some(());
+            }
+        }
+        return None;
+    }
+    Some(SavingError::UserDontExist)
+}
+
+pub fn save_message_binary(recieved: &BLOBMessageRecivedProcessed) -> Option<SavingError> {
+    let conn = connect_to_db().unwrap();
+    let mut search = conn.prepare("SELECT 1 FROM users WHERE id=?").unwrap();
+    let rows = search.query_map(&[&recieved.to], |_| Ok(())).unwrap();
+    for _r in rows {
+        //let blob = rusqlite::blob::Blob::; //::write_all(recieved.payload.as_slice(), 0).unwrap();
+        //
+        let dbg = conn.execute(
+            "INSERT INTO undelivered_messages_blob (user_id, data,sender,date) VALUES (?1, ?2, ?3)",
+            params![
                 &recieved.to,
                 &recieved.payload,
                 &recieved.from,
