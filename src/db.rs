@@ -64,7 +64,12 @@ pub fn connect_to_db() -> Result<Connection, rusqlite::Error> {
     Ok(conn)
 }
 
-pub fn save_message_text(recieved: &TextMessageRecivedProcessed) -> Option<()> {
+#[derive(Debug)]
+pub enum SavingError {
+    UserDontExist,
+}
+
+pub fn save_message_text(recieved: &TextMessageRecivedProcessed) -> Option<SavingError> {
     let conn = connect_to_db().unwrap();
     let mut search = conn.prepare("SELECT 1 FROM users WHERE id=?").unwrap();
     let rows = search.query_map(&[&recieved.to], |_| Ok(())).unwrap();
@@ -80,13 +85,17 @@ pub fn save_message_text(recieved: &TextMessageRecivedProcessed) -> Option<()> {
         );
 
         match dbg {
-            Ok(_) => {}
-            Err(_) => {
-                return None;
+            Ok(a) => {
+                dbg!(a);
+            }
+            Err(error) => {
+                dbg!(error);
+                //return Some(());
             }
         }
+        return None;
     }
-    None
+    Some(SavingError::UserDontExist)
 }
 
 pub fn validate_connection(

@@ -1,5 +1,6 @@
 use crate::db;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::any::Any;
 
 #[derive(Debug)]
 pub enum IncomingMessage {
@@ -11,6 +12,7 @@ use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
+
 struct CurrentUser {
     id: String,
 }
@@ -21,7 +23,7 @@ pub type SINGLEUsersConnected = Arc<Mutex<HashMap<String, Vec<IncomingMessage>>>
                                                                                    //
 use std::{
     collections::HashMap,
-    str::FromStr,
+    fmt::Debug,
     sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
@@ -35,12 +37,42 @@ pub struct TextMessageRecivedRaw {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct TextMessageRecivedRawError {
+pub struct BLOBMessageRecivedRaw {
+    pub payload: Vec<u8>,
+    pub destination: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct MessageRecivedRawError {
     error: String,
 }
 
-impl TextMessageRecivedRaw {
-    fn to_processed(self, from: &String) -> TextMessageRecivedProcessed {
+trait Processed {
+    fn to(&self) -> &String;
+}
+impl Processed for IncomingMessage {
+    fn to(&self) -> &String {
+        match self {
+            IncomingMessage::Text(v) => &v.to,
+            IncomingMessage::Binary(v) => &v.to,
+        }
+    }
+}
+
+trait ToProcessed {
+    fn to_processed(self, from: &String) -> IncomingMessage;
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct TextMessageRecivedProcessed {
+    pub payload: String,
+    pub from: String,
+    pub time_sent: String,
+    pub to: String,
+}
+
+impl ToProcessed for TextMessageRecivedRaw {
+    fn to_processed(self, from: &String) -> IncomingMessage {
         //let config = CONFIG.read().unwrap();
         //let time_sent = if config.register_time_message_sent {
         let time_sent = if true {
@@ -50,29 +82,41 @@ impl TextMessageRecivedRaw {
         };
         let from = from.clone();
         //let payload = self.payload;
-        TextMessageRecivedProcessed {
+        IncomingMessage::Text(TextMessageRecivedProcessed {
             payload: self.payload,
             from,
             time_sent,
             to: self.destination,
-        }
+        })
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-pub struct TextMessageRecivedProcessed {
-    pub payload: String,
-    pub from: String,
-    pub time_sent: String,
-    pub to: String,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct BLOBMessageRecivedProcessed {
     pub payload: Vec<u8>,
     pub from: String,
     pub time_sent: String,
     pub to: String,
+}
+
+impl ToProcessed for BLOBMessageRecivedRaw {
+    fn to_processed(self, from: &String) -> IncomingMessage {
+        //let config = CONFIG.read().unwrap();
+        //let time_sent = if config.register_time_message_sent {
+        let time_sent = if true {
+            Utc::now().to_string()
+        } else {
+            String::new()
+        };
+        let from = from.clone();
+        //let payload = self.payload;
+        IncomingMessage::Binary(BLOBMessageRecivedProcessed {
+            payload: self.payload,
+            from,
+            time_sent,
+            to: self.destination,
+        })
+    }
 }
 
 async fn sending(
@@ -105,8 +149,8 @@ async fn receving(
     state: Arc<RwLock<bool>>,
 ) {
     loop {
-        match rx.next().await {
-            Some(val) => match val {
+        if let Some(val) = rx.next().await {
+            match val {
                 Ok(v) => {
                     if v.is_close() {
                         println!("Cerrado");
@@ -115,51 +159,74 @@ async fn receving(
                         return;
                     }
                     if v.is_text() {
-                        let s: Result<TextMessageRecivedRaw, serde_json::Error> =
-                            serde_json::from_str(v.to_str().unwrap());
-                        match s {
-                            Ok(val) => {
-                                dbg!(&val);
-                                let mut connection = connected_users.lock().unwrap();
-                                let processed = val.to_processed(&current_id);
-                                match connection.get_mut(&processed.to) {
-                                    Some(vector) => {
-                                        vector.push(IncomingMessage::Text(processed));
-                                        dbg!("Mensaje enviado a que");
-                                    }
-                                    None => {
-                                        //User is online but it dosent exists? probably Unreachable
-                                        //c.insert(val.destination, vec![inc_message]);
-                                        let _result = db::save_message_text(&processed);
-                                        //TODO
-                                        //HANDLE RESULT
-                                    }
-                                };
-                            }
-                            Err(_) => {
-                                let error = String::from_str("Bad format").unwrap();
-                                let error = TextMessageRecivedRawError { error };
-                                dbg!(error); //Propagate Error to sender
-                            }
-                        }
+                        handle_sending::<TextMessageRecivedRaw>(&v, &connected_users, &current_id);
                     }
                     if v.is_binary() {
-                        let _s: Result<BLOBMessageRecivedProcessed, serde_json::Error> =
-                            serde_json::from_str(v.to_str().unwrap());
+                        handle_sending::<BLOBMessageRecivedRaw>(&v, &connected_users, &current_id);
                     }
                 }
                 Err(_) => {}
-            },
-            None => {}
-        };
+            };
+        }
     }
 }
+
+fn handle_sending<T>(
+    v: &warp::ws::Message,
+    connected_users: &SINGLEUsersConnected,
+    current_id: &String,
+) where
+    T: DeserializeOwned + Debug + ToProcessed,
+{
+    let result: Result<T, serde_json::Error> = serde_json::from_str(v.to_str().unwrap());
+    match result {
+        Ok(val) => {
+            let mut connection = connected_users.lock().unwrap();
+            let processed = val.to_processed(&current_id);
+            dbg!(&processed);
+            match connection.get_mut(processed.to()) {
+                Some(vector) => {
+                    vector.push(processed);
+                    dbg!("Mensaje enviado a que");
+                }
+                None => {
+                    //User is online but it dosent exists? probably Unreachable
+                    //c.insert(val.destination, vec![inc_message]);
+                    //
+                    match processed {
+                        IncomingMessage::Text(v) => {
+                            match db::save_message_text(&v) {
+                                None => {}
+                                Some(error) => {
+                                    dbg!(error);
+                                }
+                            };
+                        }
+                        IncomingMessage::Binary(_) => {}
+                    };
+                    //TODO
+                    //HANDLE RESULT
+                }
+            }
+        }
+        Err(_) => {
+            let error = MessageRecivedRawError {
+                error: String::from("Bad format"),
+            };
+            dbg!(error); // Propagate error to sender
+        }
+    }
+}
+
+//fn get_value(input: &dyn Processed) -> &dyn Any {
+//    &input as &dyn Any
+//}
 
 pub async fn handle_connection(
     websocket: warp::ws::WebSocket,
     valid_conn: bool,
     connected_users: SINGLEUsersConnected,
-    cuurent: String,
+    current: String,
 ) {
     if !valid_conn {
         let _ = websocket.close().await;
@@ -168,7 +235,7 @@ pub async fn handle_connection(
     }
     println!("Coneccion Valida");
     let (tx, rx) = websocket.split();
-    let current = CurrentUser { id: cuurent }; //TODO Let it be the id in the server
+    let current = CurrentUser { id: current }; //TODO Let it be the id in the server
     let connection_state = Arc::new(RwLock::new(false));
     let tx = tokio::spawn(sending(tx, Arc::clone(&connection_state)));
     let rx = tokio::spawn(receving(

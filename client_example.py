@@ -15,7 +15,7 @@ import json
 
 text_recived_raw = {
         "payload":None,
-        "destination":"1"
+        "destination":"AAA"
         }
 
 class CanelaError(Exception):
