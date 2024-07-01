@@ -1,4 +1,3 @@
-use chrono::prelude::{DateTime, Utc};
 use clap::Parser;
 use jwt_simple::prelude::*;
 use lazy_static::lazy_static;

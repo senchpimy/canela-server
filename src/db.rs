@@ -1,6 +1,6 @@
 use crate::{
     add_valid_connection,
-    ws::{BLOBMessageRecivedProcessed, TextMessageRecivedProcessed},
+    ws::{BLOBMessageRecivedProcessed, ChatErrors, TextMessageRecivedProcessed},
     NewUserResgistered,
 };
 use rusqlite::{params, Connection, Result};
@@ -10,7 +10,6 @@ use uuid::Uuid;
 
 use std::{
     collections::HashMap,
-    io::Write,
     sync::{Arc, Mutex},
 };
 
@@ -65,12 +64,7 @@ pub fn connect_to_db() -> Result<Connection, rusqlite::Error> {
     Ok(conn)
 }
 
-#[derive(Debug)]
-pub enum SavingError {
-    UserDontExist,
-}
-
-pub fn save_message_text(recieved: &TextMessageRecivedProcessed) -> Option<SavingError> {
+pub fn save_message_text(recieved: &TextMessageRecivedProcessed) -> Option<ChatErrors> {
     let conn = connect_to_db().unwrap();
     let mut search = conn.prepare("SELECT 1 FROM users WHERE id=?").unwrap();
     let rows = search.query_map(&[&recieved.to], |_| Ok(())).unwrap();
@@ -96,10 +90,10 @@ pub fn save_message_text(recieved: &TextMessageRecivedProcessed) -> Option<Savin
         }
         return None;
     }
-    Some(SavingError::UserDontExist)
+    Some(ChatErrors::UserDontExist)
 }
 
-pub fn save_message_binary(recieved: &BLOBMessageRecivedProcessed) -> Option<SavingError> {
+pub fn save_message_binary(recieved: &BLOBMessageRecivedProcessed) -> Option<ChatErrors> {
     let conn = connect_to_db().unwrap();
     let mut search = conn.prepare("SELECT 1 FROM users WHERE id=?").unwrap();
     let rows = search.query_map(&[&recieved.to], |_| Ok(())).unwrap();
@@ -127,7 +121,7 @@ pub fn save_message_binary(recieved: &BLOBMessageRecivedProcessed) -> Option<Sav
         }
         return None;
     }
-    Some(SavingError::UserDontExist)
+    Some(ChatErrors::UserDontExist)
 }
 
 pub fn validate_connection(
