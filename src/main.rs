@@ -52,8 +52,14 @@ async fn main() {
     let connection_req = {
         let conn = Arc::clone(&conn);
         let valid_connections = Arc::clone(&valid_connections);
+        let mut str = String::new();
         move |val: db::ConnectionAttempt| {
-            db::validate_connection(val, Arc::clone(&conn), Arc::clone(&valid_connections))
+            db::validate_connection(
+                val,
+                Arc::clone(&conn),
+                Arc::clone(&valid_connections),
+                &mut str,
+            )
         }
     };
 
@@ -71,6 +77,8 @@ async fn main() {
                 let conn_users = Arc::clone(&CONNECTED_USERS);
                 let result = is_valid_connection(Arc::clone(&valid_connections), header_rx, jwt);
                 ws.on_upgrade(move |socket| {
+                    let mut t = conn_users.lock().unwrap();
+                    t.insert(String::new(), Arc::new(Mutex::new(Vec::new())));
                     ws::handle_connection(
                         socket,
                         result,
@@ -106,28 +114,30 @@ fn is_valid_connection(
     user_token: String,
     jwt: String,
 ) -> bool {
-    loop {
-        match valid_conn.lock() {
-            Ok(conn) => {
-                let validation = conn.get(&user_token);
-                if let Some(res) = validation {
-                    let key = HS256Key::from_bytes(res);
-                    match key.verify_token::<NoCustomClaims>(&jwt, None) {
-                        Ok(o) => {
-                            let now = Clock::now_since_epoch();
-                            let is_expired = o.expires_at.unwrap() < now;
-                            if is_expired {
-                                println!("Expirado");
-                            }
-                            return !is_expired;
+    return match valid_conn.lock() {
+        Ok(conn) => {
+            let validation = conn.get(&user_token);
+            if let Some(res) = validation {
+                let key = HS256Key::from_bytes(res);
+                match key.verify_token::<NoCustomClaims>(&jwt, None) {
+                    Ok(o) => {
+                        let now = Clock::now_since_epoch();
+                        let is_expired = o.expires_at.unwrap() < now;
+                        if is_expired {
+                            println!("Expirado");
                         }
-                        Err(_) => {
-                            return false;
-                        }
+                        return !is_expired;
                     }
-                };
-            }
-            Err(_) => {}
+                    Err(_) => {
+                        return false;
+                    }
+                }
+            };
+            false //Handle Again
         }
-    }
+        Err(_) => {
+            //TODO Handle error
+            false
+        }
+    };
 }

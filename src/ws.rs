@@ -12,12 +12,12 @@ use futures_util::{
     SinkExt, StreamExt,
 };
 
+#[derive(Debug)]
 struct CurrentUser {
     id: String,
 }
 
-pub type SINGLEUsersConnected = Arc<Mutex<HashMap<String, Arc<Vec<IncomingMessage>>>>>;
-use core::str;
+pub type SINGLEUsersConnected = Arc<Mutex<HashMap<String, Arc<Mutex<Vec<IncomingMessage>>>>>>;
 //Hashmap of current users
 //online and a reference to a
 //variable that checks for uncoming messages
@@ -27,7 +27,6 @@ use std::{
     fmt::Debug,
     str::FromStr,
     sync::{Arc, Mutex, RwLock},
-    time::Duration,
 };
 
 use chrono::prelude::Utc;
@@ -121,10 +120,35 @@ impl ReciverFeedback {
     }
 }
 
-struct MessageSend {}
+#[derive(Serialize, Deserialize)]
+struct MessageSend {
+    from: String,
+    payload: Option<String>,
+    time_sent: String,
+    data: Option<Vec<u8>>,
+}
+
 impl MessageSend {
-    fn from_str(str: &str) -> Self {
-        Self {}
+    fn format(&self) -> String {
+        serde_json::to_string(self).unwrap()
+    }
+
+    fn from_text(text: TextMessageRecivedProcessed) -> Self {
+        Self {
+            from: text.from,
+            payload: Some(text.payload),
+            time_sent: text.time_sent,
+            data: None,
+        }
+    }
+
+    fn from_bin(text: BLOBMessageRecivedProcessed) -> Self {
+        Self {
+            from: text.from,
+            payload: None,
+            time_sent: text.time_sent,
+            data: Some(text.payload),
+        }
     }
 }
 
@@ -153,7 +177,6 @@ impl ToProcessed for BLOBMessageRecivedRaw {
             String::new()
         };
         let from = from.clone();
-        //let payload = self.payload;
         IncomingMessage::Binary(BLOBMessageRecivedProcessed {
             payload: self.payload,
             from,
@@ -166,7 +189,7 @@ impl ToProcessed for BLOBMessageRecivedRaw {
 async fn sending(
     mut tx: SplitSink<warp::ws::WebSocket, warp::ws::Message>,
     state: Arc<RwLock<ReciverFeedback>>,
-    personal_vec: Arc<Vec<IncomingMessage>>,
+    personal_vec: Arc<Mutex<Vec<IncomingMessage>>>,
 ) {
     //let mut index: u64 = 0;
     loop {
@@ -180,12 +203,31 @@ async fn sending(
                 ChatErrors::BadFormat => warp::filters::ws::Message::text(
                     MessageSendError::from_error("Bad format!: Can serialize the JSON").format(),
                 ),
-                ChatErrors::UserDontExist => warp::filters::ws::Message::text(
-                    MessageSendError::from_error("User Dont exist").format(),
-                ),
+                ChatErrors::UserDontExist => {
+                    dbg!("User dont Exist");
+                    warp::filters::ws::Message::text(
+                        MessageSendError::from_error("User Dont exist").format(),
+                    )
+                }
             };
             m = Some(r);
         };
+
+        let r = personal_vec.lock().unwrap().is_empty();
+        if !r {
+            let message = personal_vec.lock().unwrap().remove(0);
+            m = match message {
+                IncomingMessage::Text(v) => {
+                    let m = MessageSend::from_text(v);
+                    Some(warp::filters::ws::Message::text(m.format()))
+                }
+                IncomingMessage::Binary(v) => {
+                    let m = MessageSend::from_bin(v);
+                    Some(warp::filters::ws::Message::text(m.format()))
+                }
+            }
+        }
+
         if let Some(message) = m {
             match tx.send(message).await {
                 Ok(_) => {} //Enviado con exito
@@ -195,7 +237,8 @@ async fn sending(
             };
             println!("Mensaje Enviado");
         };
-        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        //tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -257,12 +300,15 @@ where
             dbg!(&processed);
             match connection.get_mut(processed.to()) {
                 Some(vector) => {
-                    //let v: &mut Vec<IncomingMessage> = vector.as_mut();
+                    let r = &(*vector);
+                    let mut lock = r.lock();
+                    let v = lock.as_mut().unwrap();
                     v.push(processed);
                     dbg!("Mensaje enviado a que");
                     None
                 }
                 None => {
+                    dbg!("NO existe el destinatario");
                     //User is online but it dosent exists? probably Unreachable
                     //c.insert(val.destination, vec![inc_message]);
                     //
@@ -300,8 +346,15 @@ pub async fn handle_connection(
     println!("Coneccion Valida");
     let (tx, rx) = websocket.split();
     let current = CurrentUser { id: current }; //TODO Let it be the id in the server
+    dbg!(&current);
     let connection_state = Arc::new(RwLock::new(ReciverFeedback::new()));
-    let personal_vec = Arc::clone(connected_users.lock().unwrap().get_mut("").unwrap());
+    let personal_vec = Arc::clone(
+        connected_users
+            .lock()
+            .unwrap()
+            .get_mut(&String::new()) //TODO Change for the user ID
+            .unwrap(),
+    );
     let tx = tokio::spawn(sending(tx, Arc::clone(&connection_state), personal_vec));
     let rx = tokio::spawn(receving(
         rx,
@@ -309,5 +362,10 @@ pub async fn handle_connection(
         current.id,
         Arc::clone(&connection_state),
     ));
-    let res = tokio::try_join!(tx, rx);
+    match tokio::try_join!(tx, rx) {
+        Ok(_) => {}
+        Err(_) => {
+            //TODO Log the error
+        }
+    }
 }

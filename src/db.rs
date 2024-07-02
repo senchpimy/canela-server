@@ -23,7 +23,7 @@ pub struct ConnectionAttempt {
 pub type ValidConnections<S> = Arc<Mutex<HashMap<S, Vec<u8>>>>;
 
 struct DbSearch {
-    id: i32,
+    id: String,
     connections_left: i32,
 }
 
@@ -128,6 +128,7 @@ pub fn validate_connection(
     data: ConnectionAttempt,
     db: Arc<Mutex<Connection>>,
     valid_conn: ValidConnections<String>,
+    id: &mut String,
 ) -> impl warp::Reply {
     let server_require_password = true; //TODO Get from config
     let server_can_generate_new_tokens = true; //TODO Get from config
@@ -179,7 +180,8 @@ pub fn validate_connection(
     for r in rows {
         let r = r.unwrap();
         dbg!(r.connections_left);
-        dbg!(r.id);
+        dbg!(&r.id);
+        *id = r.id;
         let session_token = add_valid_connection(valid_conn, &data.token);
         let response = NewUserResgistered {
             token: "Connection stablished".to_string(),
