@@ -2,8 +2,8 @@ import encodings
 import json
 url = "http://localhost:3030/connect"
 headers = {"Content-Type": "application/json"}
-#data = {"password": "", "user": "", "token": "58aca8a6-f33f-4e65-a7ce-00d6a3ed03bb"}
-data = {"password": "", "user": "", "token": "c903b152-bda4-49f2-913e-6ab3f7bbc225"}
+data = {"password": "", "user": "", "token": ""}
+#data = {"password": "", "user": "", "token": "c903b152-bda4-49f2-913e-6ab3f7bbc225"}
 
 import asyncio
 from time import process_time
@@ -63,6 +63,9 @@ if __name__ == "__main__":
     response = requests.get(url, headers=headers, json=data)
     print(response)
     print(response.text)
+    if data["token"]=="":
+        data["token"]=dict(response.json())["token"]
+
 
     jwt = response.json().get("session_token")
     print(jwt)

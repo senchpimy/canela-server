@@ -141,25 +141,34 @@ pub fn validate_connection(
     //Case where user is not registered, so we add them to the whitelist and send back the token
     if data.token.len() == 0 && server_can_generate_new_tokens {
         let token = Uuid::new_v4();
+        let token_str = token.to_string();
         let res = r.execute(
-            "INSERT INTO users (token, connections_left) VALUES (1?, 2?)",
-            params![token.to_string(), 20],
+            "INSERT INTO users (token, connections_left) VALUES (?1, ?2)",
+            params![&token_str, 20],
         );
         match res {
             Ok(_) => {}
-            Err(_) => {
+            Err(e) => {
+                dbg!(e);
                 return Err("Error inserting new user the db");
             }
         }
-        let user_token = token.to_string();
-        let TODO = String::new();
-        let session_token = add_valid_connection(valid_conn, &user_token, TODO); //TODO get id of
-                                                                                 //inserted user
-        let response = NewUserResgistered {
-            token: user_token,
-            session_token,
-        };
-        return Ok(warp::reply::json(&response)); //reply the token and connections left
+        let mut res = r.prepare("SELECT id FROM users WHERE token=?").unwrap();
+        let row = res
+            .query_map(&[&token_str], |r| Ok(r.get::<usize, usize>(0).unwrap()))
+            .unwrap();
+        for r in row {
+            let str_id = r.unwrap();
+            let user_token = token_str;
+            let session_token = add_valid_connection(valid_conn, &user_token, str_id.to_string()); //TODO get id of
+                                                                                                   //inserted user
+            let response = NewUserResgistered {
+                token: user_token,
+                session_token,
+            };
+            return Ok(warp::reply::json(&response)); //reply the token and connections left
+        }
+        return Err("Weird unreacheble error?");
     }
 
     //Case where the user is registered

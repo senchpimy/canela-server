@@ -44,7 +44,7 @@ struct NewUserResgistered {
 #[tokio::main]
 async fn main() {
     let args = Args::parse(); // Assume Args is defined elsewhere
-    let connection = db::prepare_db().unwrap(); // Assume connect_to_db() is defined elsewhere
+    let connection = db::prepare_db().unwrap();
     let valid_connections: db::ValidConnections<String> = Arc::new(Mutex::new(HashMap::new()));
     let CONNECTED_USERS: ws::SINGLEUsersConnected = Arc::new(Mutex::new(HashMap::new()));
     let conn = Arc::new(Mutex::new(connection));
@@ -117,18 +117,20 @@ fn is_valid_connection(
                     Ok(o) => {
                         let now = Clock::now_since_epoch();
                         let is_expired = o.expires_at.unwrap() < now;
-                        let str = 
-                        if is_expired {
+                        let str = if is_expired {
                             None
-                        }else{Some(res.1.clone())};
+                        } else {
+                            Some(res.1.clone())
+                        };
                         return (!is_expired, str);
                     }
                     Err(_) => {
                         return (false, None);
                     }
                 }
-            };
-            (false, None) //Handle Again
+            
+            }
+    (false, None) //Handle Again
         }
         Err(_) => {
             //TODO Handle error
