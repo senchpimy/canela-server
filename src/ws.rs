@@ -336,7 +336,7 @@ pub async fn handle_connection(
     websocket: warp::ws::WebSocket,
     valid_conn: bool,
     connected_users: SINGLEUsersConnected,
-    current: String,
+    current: Option<String>,
 ) {
     if !valid_conn {
         let _ = websocket.close().await;
@@ -345,7 +345,9 @@ pub async fn handle_connection(
     }
     println!("Coneccion Valida");
     let (tx, rx) = websocket.split();
-    let current = CurrentUser { id: current }; //TODO Let it be the id in the server
+    let current = CurrentUser {
+        id: current.unwrap(),
+    }; //TODO Let it be the id in the server
     dbg!(&current);
     let connection_state = Arc::new(RwLock::new(ReciverFeedback::new()));
     let personal_vec = Arc::clone(

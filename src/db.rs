@@ -20,10 +20,10 @@ pub struct ConnectionAttempt {
     token: String,
 }
 
-pub type ValidConnections<S> = Arc<Mutex<HashMap<S, Vec<u8>>>>;
+pub type ValidConnections<S> = Arc<Mutex<HashMap<S, (Vec<u8>, S)>>>;
 
 struct DbSearch {
-    id: String,
+    id: usize,
     connections_left: i32,
 }
 
@@ -128,7 +128,6 @@ pub fn validate_connection(
     data: ConnectionAttempt,
     db: Arc<Mutex<Connection>>,
     valid_conn: ValidConnections<String>,
-    id: &mut String,
 ) -> impl warp::Reply {
     let server_require_password = true; //TODO Get from config
     let server_can_generate_new_tokens = true; //TODO Get from config
@@ -143,21 +142,19 @@ pub fn validate_connection(
     if data.token.len() == 0 && server_can_generate_new_tokens {
         let token = Uuid::new_v4();
         let res = r.execute(
-            &format!(
-                "INSERT INTO users (token, connections_left) VALUES ('{}', {})",
-                token,
-                20 //TODO Get from config
-            ),
-            [],
+            "INSERT INTO users (token, connections_left) VALUES (1?, 2?)",
+            params![token.to_string(), 20],
         );
         match res {
             Ok(_) => {}
             Err(_) => {
-                return Err("Error in the db");
+                return Err("Error inserting new user the db");
             }
         }
         let user_token = token.to_string();
-        let session_token = add_valid_connection(valid_conn, &user_token);
+        let TODO = String::new();
+        let session_token = add_valid_connection(valid_conn, &user_token, TODO); //TODO get id of
+                                                                                 //inserted user
         let response = NewUserResgistered {
             token: user_token,
             session_token,
@@ -181,8 +178,7 @@ pub fn validate_connection(
         let r = r.unwrap();
         dbg!(r.connections_left);
         dbg!(&r.id);
-        *id = r.id;
-        let session_token = add_valid_connection(valid_conn, &data.token);
+        let session_token = add_valid_connection(valid_conn, &data.token, r.id.to_string());
         let response = NewUserResgistered {
             token: "Connection stablished".to_string(),
             session_token,

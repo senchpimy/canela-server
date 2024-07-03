@@ -52,14 +52,8 @@ async fn main() {
     let connection_req = {
         let conn = Arc::clone(&conn);
         let valid_connections = Arc::clone(&valid_connections);
-        let mut str = String::new();
         move |val: db::ConnectionAttempt| {
-            db::validate_connection(
-                val,
-                Arc::clone(&conn),
-                Arc::clone(&valid_connections),
-                &mut str,
-            )
+            db::validate_connection(val, Arc::clone(&conn), Arc::clone(&valid_connections))
         }
     };
 
@@ -75,16 +69,12 @@ async fn main() {
             .and(warp::header("jwt"))
             .map(move |ws: warp::ws::Ws, header_rx: String, jwt: String| {
                 let conn_users = Arc::clone(&CONNECTED_USERS);
-                let result = is_valid_connection(Arc::clone(&valid_connections), header_rx, jwt);
+                let (result, id) =
+                    is_valid_connection(Arc::clone(&valid_connections), header_rx, jwt);
                 ws.on_upgrade(move |socket| {
                     let mut t = conn_users.lock().unwrap();
                     t.insert(String::new(), Arc::new(Mutex::new(Vec::new())));
-                    ws::handle_connection(
-                        socket,
-                        result,
-                        Arc::clone(&conn_users),
-                        String::from("sss"), //TODO GET USER
-                    )
+                    ws::handle_connection(socket, result, Arc::clone(&conn_users), id)
                 })
             })
     };
@@ -93,15 +83,19 @@ async fn main() {
     warp::serve(routes).run(([127, 0, 0, 1], args.port)).await;
 }
 
-fn add_valid_connection(valid_conn: db::ValidConnections<String>, user_token: &String) -> String {
+fn add_valid_connection(
+    valid_conn: db::ValidConnections<String>,
+    user_token: &String,
+    user_id: String,
+) -> String {
     loop {
         match valid_conn.lock() {
             Ok(mut conn) => {
                 let key = HS256Key::generate();
                 let claims = Claims::create(jwt_simple::prelude::Duration::from_millis(1000));
                 let token = key.authenticate(claims).unwrap();
-                dbg!(&token);
-                conn.insert((*user_token).clone(), key.to_bytes());
+                let str = user_id;
+                conn.insert((*user_token).clone(), (key.to_bytes(), str));
                 return token;
             }
             Err(_) => {}
@@ -113,31 +107,32 @@ fn is_valid_connection(
     valid_conn: db::ValidConnections<String>,
     user_token: String,
     jwt: String,
-) -> bool {
+) -> (bool, Option<String>) {
     return match valid_conn.lock() {
         Ok(conn) => {
             let validation = conn.get(&user_token);
             if let Some(res) = validation {
-                let key = HS256Key::from_bytes(res);
+                let key = HS256Key::from_bytes(&res.0);
                 match key.verify_token::<NoCustomClaims>(&jwt, None) {
                     Ok(o) => {
                         let now = Clock::now_since_epoch();
                         let is_expired = o.expires_at.unwrap() < now;
+                        let str = 
                         if is_expired {
-                            println!("Expirado");
-                        }
-                        return !is_expired;
+                            None
+                        }else{Some(res.1.clone())};
+                        return (!is_expired, str);
                     }
                     Err(_) => {
-                        return false;
+                        return (false, None);
                     }
                 }
             };
-            false //Handle Again
+            (false, None) //Handle Again
         }
         Err(_) => {
             //TODO Handle error
-            false
+            (false, None)
         }
     };
 }
